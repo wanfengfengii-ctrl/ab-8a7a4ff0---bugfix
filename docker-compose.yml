@@ -1,0 +1,37 @@
+services:
+  web:
+    build:
+      context: .
+      target: runtime
+    image: dome-adjudicator:latest
+    container_name: dome-adjudicator-web
+    environment:
+      # 容器内监听端口（右侧映射端口）；如修改请同步调整 ports 映射
+      PORT: "8080"
+    ports:
+      # 宿主机端口可通过 .env 中的 HOST_PORT 配置，默认 8080
+      - "${HOST_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+        "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=3).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 3s
+
+  # 一次性裁决流水线：web 健康后执行 代码测试 → 前端构建 → API 冒烟，
+  # 以容器退出码报告结果（0 通过，非 0 失败，可用
+  # `docker compose ps` / `docker compose logs verify` 查看）。
+  # 只跑该服务：docker compose run --rm verify
+  verify:
+    build:
+      context: .
+      target: verify
+    image: dome-adjudicator-verify:latest
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://web:8080
+    restart: "no"

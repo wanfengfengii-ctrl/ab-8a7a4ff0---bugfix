@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>玻璃穹顶基线网位移裁决</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>玻璃穹顶裂纹监测 · 基线网位移联合裁决</h1>
+      <p class="subtitle">
+        整数几何穷举裁决：每点恰选一条候选位移，保持三角面严格朝向、
+        边长平方闭区间、非共端边不相交且不相切。无方案时给出确定性的首个违约证据。
+      </p>
+    </header>
+    <main id="app"></main>
+    <footer class="footer">
+      全部几何判定仅使用整数叉积与长度平方 · 枚举上限 3<sup>8</sup> = 6561 种组合
+    </footer>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

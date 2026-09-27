@@ -1,0 +1,15 @@
+{
+  "name": "dome-adjudicator-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "玻璃穹顶基线网位移裁决前端",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}
