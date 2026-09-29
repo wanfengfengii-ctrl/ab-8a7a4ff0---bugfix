@@ -23,9 +23,13 @@
 
 分段落位复核（stagedReview=true）
 --------------------------------
-在候选位移与落位顺序的**完整组合空间**中联合裁决：逐点把基准点从基线位置
+在候选位移与落位顺序的**完整组合空间**中联合裁决：**施工起点（尚未落位
+任何点的基线网本身）首先必须满足全部硬约束**，随后逐点把基准点从基线位置
 移至该方案采用的位置，每一步形成的混合网（已落位点取位移后坐标，未落位点
-仍取基线坐标）都必须继续满足上述三条硬规则。最终方案仍按 (a)(b)(c) 比较；
+仍取基线坐标）都必须继续满足上述三条硬规则。因此即使某个最终组合几何合法，
+只要基线起点已存在非共端边交叉（或边长越界），启用分段复核仍稳定判负，
+理由为 ``baseline-infeasible`` 并给出基线起点违约证据，不得因终态可合法
+而放行首步即不安全的施工方案。最终方案仍按 (a)(b)(c) 比较；
 静态指标相同的方案不存在（候选序号向量唯一确定方案），但静态最优方案若不
 存在安全次序，裁决会继续考察静态上次优、却可安全落位的方案，而**不是**先
 选定静态方案再事后试排。次序间再按：
@@ -428,6 +432,75 @@ def _affected_pairs(edges: list[dict[str, Any]],
         if p in edges[ei]["endpoints"] or p in edges[ej]["endpoints"]:
             out.append((ei, ej))
     return out
+
+
+def _baseline_violation(*,
+                        points: list[dict[str, Any]],
+                        edges: list[dict[str, Any]],
+                        origin: list[tuple[int, int]],
+                        edge_pairs: list[tuple[int, int]]
+                        ) -> dict[str, Any] | None:
+    """检查施工起点（尚未落位任何点的基线网本身）是否满足全部硬约束。
+
+    启用分段复核时基线网即“第 0 步”混合网：基线已经交叉（或边长越界）
+    的网不存在安全的施工起点，即使某些候选组合的终态几何合法也不得放行。
+    基线三角面在录入阶段已保证非退化，故朝向在起点恒成立；判定次序仍为
+    边长 → 非共端边相交，同类按录入顺序。
+    """
+    # 1) 边长平方闭区间（基线长度）
+    for ei, e in enumerate(edges):
+        u, v = e["endpoints"]
+        d2 = ((origin[u][0] - origin[v][0]) ** 2
+              + (origin[u][1] - origin[v][1]) ** 2)
+        if d2 < e["minSq"] or d2 > e["maxSq"]:
+            side = "小于下限" if d2 < e["minSq"] else "大于上限"
+            return {
+                "kind": "length",
+                "stage": "baseline",
+                "order": (1, ei),
+                "edgeIndex": ei,
+                "endpoints": [u, v],
+                "minSq": e["minSq"],
+                "maxSq": e["maxSq"],
+                "actualSq": d2,
+                "side": side,
+                "message": (
+                    f"施工起点基线网中边 "
+                    f"{points[u]['name']}–{points[v]['name']} "
+                    f"长度平方 {d2} {side}（闭区间 "
+                    f"[{e['minSq']}, {e['maxSq']}]），首步即不满足硬约束，"
+                    "不存在安全的施工起点"),
+            }
+
+    # 2) 非共端边相交/相切（基线坐标）
+    for pair_order, (ei, ej) in enumerate(edge_pairs):
+        a = edges[ei]["endpoints"]
+        b = edges[ej]["endpoints"]
+        hit = _segment_hit(origin[a[0]], origin[a[1]],
+                           origin[b[0]], origin[b[1]])
+        if hit.intersect:
+            kind = "相切（单点接触）" if hit.touching else "正向相交"
+            return {
+                "kind": "crossing",
+                "stage": "baseline",
+                "order": (2, pair_order),
+                "edgeA": ei,
+                "edgeB": ej,
+                "endpointsA": a,
+                "endpointsB": b,
+                "touching": hit.touching,
+                "coordsA": [[origin[a[0]][0], origin[a[0]][1]],
+                           [origin[a[1]][0], origin[a[1]][1]]],
+                "coordsB": [[origin[b[0]][0], origin[b[0]][1]],
+                           [origin[b[1]][0], origin[b[1]][1]]],
+                "message": (
+                    "施工起点（尚未落位任何点的基线网）中不共享端点的边 "
+                    f"{points[a[0]]['name']}–{points[a[1]]['name']} 与 "
+                    f"{points[b[0]]['name']}–{points[b[1]]['name']}"
+                    f"{kind}，缆线不得交叉或相切；基线起点已违约，"
+                    "不得因最终组合可合法而放行首步即不安全的施工方案"),
+            }
+    return None
 
 
 def _check_placement(q: int, pos: list[tuple[int, int]], *,
@@ -849,6 +922,37 @@ def _attach_staged_review(report: dict[str, Any], *,
             feasible_choices.append(
                 ((max(disp_sq), sum(disp_sq), combo), list(combo)))
     feasible_choices.sort(key=lambda t: t[0])
+
+    # 情形零：施工起点（尚未落位任何点的基线网本身）不满足硬约束——
+    # 基线已交叉/越界时，无论是否存在终态合法的候选组合，首步施工都不安全。
+    # 在进入任何落位顺序搜索前稳定判负，并给出基线起点违约证据。
+    baseline_bad = _baseline_violation(
+        points=points, edges=edges, origin=origin,
+        edge_pairs=edge_pairs)
+    if baseline_bad is not None:
+        report["feasible"] = False
+        report["stagedReview"] = {
+            "enabled": True,
+            "feasible": False,
+            "reason": "baseline-infeasible",
+            "message": (
+                "施工起点（尚未落位任何点的基线网）已违反硬约束，"
+                "不存在安全的首步落位；分段复核在基线起点即判负，"
+                "不因最终组合可合法而放行，未进入落位顺序搜索。"),
+            "order": None,
+            "steps": [],
+            "blocking": None,
+            "baselineViolation": baseline_bad,
+            "search": {
+                "combinations": total,
+                "combinationsTried": tried,
+                "finalFeasibleCombinations": len(feasible_choices),
+                "orderSearchedCombinations": 0,
+                "permutationsPerCombination": math.factorial(n),
+                "orderSearchVisitedStates": 0,
+            },
+        }
+        return report
 
     visited_total = 0
     winning_search: dict[str, Any] | None = None

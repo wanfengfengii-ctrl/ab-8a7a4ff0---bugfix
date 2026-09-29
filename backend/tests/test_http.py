@@ -147,3 +147,47 @@ def test_staged_review_bad_flag_returns_400(http_server):
     sample["stagedReview"] = "yes"
     status, body = _post(http_server, "/api/adjudicate", sample)
     assert status == 400 and "stagedReview" in body["error"]
+
+
+def test_staged_review_baseline_crossing_rejected(http_server):
+    # 基线边 A–D（0–3）与 B–C（1–2）不共端点且正向相交，A 右移可在终态
+    # 消除交叉：静态裁决可行，但启用分段复核必须以 baseline-infeasible 拒绝。
+    payload = {
+        "points": [
+            {"name": "A", "x": 0, "y": 0},
+            {"name": "B", "x": 9, "y": 0},
+            {"name": "C", "x": 0, "y": 9},
+            {"name": "D", "x": 9, "y": 9},
+            {"name": "E", "x": 30, "y": 30},
+        ],
+        "triangles": [[1, 2, 4]],
+        "edges": [
+            {"endpoints": [0, 3], "minSq": 0, "maxSq": 10_000_000},
+            {"endpoints": [1, 2], "minSq": 0, "maxSq": 10_000_000},
+        ],
+        "candidates": [
+            [[0, 0], [10, 0]],
+            [[0, 0], [1, 1]],
+            [[0, 0], [-1, 1]],
+            [[0, 0], [0, 1]],
+            [[0, 0], [1, 0]],
+        ],
+    }
+    # 关闭分段复核：静态最终几何语义不变，仍可行
+    status, static = _post(http_server, "/api/adjudicate", payload)
+    assert status == 200
+    assert static["feasible"] is True
+    assert "stagedReview" not in static
+    # 启用分段复核：基线起点交叉，稳定判负并给出基线交叉证据
+    payload["stagedReview"] = True
+    status, report = _post(http_server, "/api/adjudicate", payload)
+    assert status == 200
+    assert report["feasible"] is False
+    sr = report["stagedReview"]
+    assert sr["feasible"] is False
+    assert sr["reason"] == "baseline-infeasible"
+    bv = sr["baselineViolation"]
+    assert bv["kind"] == "crossing" and bv["touching"] is False
+    assert {bv["edgeA"], bv["edgeB"]} == {0, 1}
+    assert bv["coordsA"] == [[0, 0], [9, 9]]
+    assert bv["coordsB"] == [[9, 0], [0, 9]]

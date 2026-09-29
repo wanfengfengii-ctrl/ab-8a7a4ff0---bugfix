@@ -95,7 +95,10 @@ function pointCardHTML(p, i) {
   const rep = state.report;
   const used = rep?.assignment?.[i];
   const cands = state.draft.candidates[i];
-  const blocking = state.stagedReview && rep?.stagedReview?.reason === "no-safe-order";
+  const srReason = state.stagedReview ? rep?.stagedReview?.reason : null;
+  const blocking = srReason === "no-safe-order";
+  // 基线起点违约时终态几何来自静态最优组合（几何合格），同受阻情形按“锚定候选”展示
+  const anchored = blocking || srReason === "baseline-infeasible";
   const rows = cands.map((c, j) => {
     const isPicked = used && used.candidateIndex === j;
     const s2 = sqOf(c);
@@ -105,7 +108,7 @@ function pointCardHTML(p, i) {
         badge = isPicked
           ? '<span class="badge used">采用</span>'
           : '<span class="badge rejected">未采用</span>';
-      } else if (blocking) {
+      } else if (anchored) {
         badge = isPicked
           ? '<span class="badge evidence">锚定候选</span>'
           : '<span class="badge rejected">未采用</span>';
@@ -129,7 +132,9 @@ function pointCardHTML(p, i) {
       ? `<div class="choice-line">位移后坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>　位移平方：<span class="mono">${used.displacementSq}</span></div>`
       : blocking
         ? `<div class="choice-line" style="color:#d8b08a">落位受阻证据锚定方案的终态坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>（终态几何合格，但无安全施工次序）</div>`
-        : `<div class="choice-line" style="color:#d89191">首个违约组合中该点位移后坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>（非采用结论，仅为证据）</div>`)
+        : srReason === "baseline-infeasible"
+          ? `<div class="choice-line" style="color:#d8b08a">静态最优组合的终态坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>（终态几何可合法，但施工起点基线网已违约，不可施工）</div>`
+          : `<div class="choice-line" style="color:#d89191">首个违约组合中该点位移后坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>（非采用结论，仅为证据）</div>`)
     : "";
   const cardCls = used
     ? (rep.feasible ? " chosen" : " evidence-card")
@@ -211,9 +216,13 @@ function bannerHTML() {
         ${orderLine}
       </div>`;
   }
-  // 无方案：静态几何不可行（firstViolation）或不存在安全落位次序（blocking）
+  // 无方案：静态几何不可行（firstViolation）、施工起点基线违约
+  // （baseline-infeasible）或不存在安全落位次序（blocking）
   if (sr?.reason === "no-safe-order") {
     return stagingBlockedBannerHTML(sr);
+  }
+  if (sr?.reason === "baseline-infeasible") {
+    return stagingBaselineBannerHTML(sr);
   }
   const v = r.firstViolation;
   const kindName = {
@@ -265,6 +274,37 @@ function stagingBlockedBannerHTML(sr) {
     </div>`;
 }
 
+function stagingBaselineBannerHTML(sr) {
+  const v = sr.baselineViolation;
+  const r = state.report;
+  const name = (i) => r.points[i].name;
+  const kindName = { orientation: "三角面朝向", length: "边长平方闭区间", crossing: "非共端边相交" }[v.kind];
+  const detail = v.kind === "crossing"
+    ? `非共端边 ${esc(name(v.endpointsA[0]))}–${esc(name(v.endpointsA[1]))}（#${v.edgeA}）× `
+      + `${esc(name(v.endpointsB[0]))}–${esc(name(v.endpointsB[1]))}（#${v.edgeB}）`
+      + `${v.touching ? "在基线坐标单点相切" : "按基线坐标正向相交"}；`
+      + `边坐标 ${JSON.stringify(v.coordsA)} × ${JSON.stringify(v.coordsB)}`
+    : v.kind === "length"
+      ? `边 #${v.edgeIndex}（${esc(name(v.endpoints[0]))}–${esc(name(v.endpoints[1]))}）基线长度平方 `
+        + `${v.actualSq} ${v.side}（闭区间 [${v.minSq}, ${v.maxSq}]）`
+      : esc(v.message);
+  return `
+    <div class="banner bad">
+      <h3>⛔ 施工起点不安全 —— 基线网在落位任何点之前已违约</h3>
+      <div>${esc(sr.message)}</div>
+      <div class="evidence">
+        <span class="pill">${kindName}</span>
+        <div>${esc(v.message)}</div>
+        <div class="kv">
+          <span class="k">违约阶段</span><span class="v">施工起点（第 0 步，尚未落位任何点）</span>
+          <span class="k">终态可行组合数</span>
+          <span class="v">${sr.search.finalFeasibleCombinations} 个（终态可合法不等于首步可施工）</span>
+          <span class="k">基线证据</span><span class="v mono" style="white-space:normal">${detail}</span>
+        </div>
+      </div>
+    </div>`;
+}
+
 function evidenceKV(v) {
   if (v.kind === "orientation") {
     return `
@@ -286,7 +326,6 @@ function evidenceKV(v) {
 function edgeTableHTML() {
   const r = state.report;
   if (!r) return "";
-  const blocking = state.stagedReview && r.stagedReview?.reason === "no-safe-order";
   const rows = r.edges.map((e) => {
     const name = (idx) => r.points[idx].name;
     return `
@@ -299,10 +338,13 @@ function edgeTableHTML() {
         <td class="${e.within ? "tag-ok" : "tag-bad"}">${e.within ? "区间内 ✓" : "越界 ✗"}</td>
       </tr>`;
   }).join("");
+  const srReason = state.stagedReview ? r.stagedReview?.reason : null;
   const caption = !r.feasible
-    ? (blocking
+    ? (srReason === "no-safe-order"
       ? '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为落位受阻证据所锚定方案（最终几何合格）的边长证据。</p>'
-      : '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为首个违约组合下的边长证据（非采用结论）。</p>')
+      : srReason === "baseline-infeasible"
+        ? '<p class="muted" style="font-size:12px;margin:0 0 8px">施工起点基线网已违约；下表为静态最优组合（终态几何合格）的边长证据，起点违约见“分段落位复核”面板。</p>'
+        : '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为首个违约组合下的边长证据（非采用结论）。</p>')
     : "";
   return `
     <div class="panel">
@@ -318,7 +360,7 @@ function edgeTableHTML() {
 function triTableHTML() {
   const r = state.report;
   if (!r) return "";
-  const blocking = state.stagedReview && r.stagedReview?.reason === "no-safe-order";
+  const srReason = state.stagedReview ? r.stagedReview?.reason : null;
   const rows = r.triangles.map((t) => {
     const names = t.vertices.map((i) => esc(r.points[i].name)).join("、");
     return `
@@ -333,9 +375,11 @@ function triTableHTML() {
       </tr>`;
   }).join("");
   const caption = !r.feasible
-    ? (blocking
+    ? (srReason === "no-safe-order"
       ? '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为落位受阻证据所锚定方案（最终几何合格）的朝向证据。</p>'
-      : '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为首个违约组合下的朝向证据（非采用结论）。</p>')
+      : srReason === "baseline-infeasible"
+        ? '<p class="muted" style="font-size:12px;margin:0 0 8px">施工起点基线网的三角面在录入时即保证严格朝向，故起点违约只有相交/相切与边长两类；下表为静态最优组合的朝向证据。</p>'
+        : '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为首个违约组合下的朝向证据（非采用结论）。</p>')
     : "";
   return `
     <div class="panel">
@@ -402,6 +446,21 @@ function svgHTML() {
       stroke="${color}" stroke-width="${width}"/>`;
   }).join("");
 
+  // 施工起点基线网违约：另以红色虚线叠加“原基线坐标”的违约边，
+  // 让基线交叉/相切在图上可见（终态几何本身不显示该交叉）。
+  const bv = state.stagedReview ? r.stagedReview?.baselineViolation : null;
+  const baselineEdgesSvg = bv
+    ? r.edges.filter((e) => bv.kind === "crossing"
+        ? (bv.edgeA === e.edgeIndex || bv.edgeB === e.edgeIndex)
+        : bv.edgeIndex === e.edgeIndex).map((e) => {
+      const [a, b] = e.endpoints;
+      const p1 = pt(orig[a]), p2 = pt(orig[b]);
+      return `<line x1="${p1[0].toFixed(1)}" y1="${p1[1].toFixed(1)}"
+        x2="${p2[0].toFixed(1)}" y2="${p2[1].toFixed(1)}"
+        stroke="#f87171" stroke-width="2.6" stroke-dasharray="6 4"/>`;
+    }).join("")
+    : "";
+
   const arrowsSvg = orig.map((o, i) => {
     const m = moved[i];
     if (o[0] === m[0] && o[1] === m[1]) return "";
@@ -430,7 +489,7 @@ function svgHTML() {
               <path d="M0,0 L6,3 L0,6 Z" fill="#fbbf24"/>
             </marker>
           </defs>
-          ${trisSvg}${edgesSvg}${arrowsSvg}${ptsSvg}
+          ${trisSvg}${edgesSvg}${baselineEdgesSvg}${arrowsSvg}${ptsSvg}
         </svg>
       </div>
       <div class="legend">
@@ -438,6 +497,7 @@ function svgHTML() {
         <span><i style="border-top:1px dashed #46557a"></i>原基线</span>
         <span><i style="border-top:2px dashed #fbbf24"></i>位移向量</span>
         <span><i style="background:#f87171"></i>违约边/面</span>
+        <span><i style="border-top:2.6px dashed #f87171"></i>起点违约基线边</span>
       </div>
     </div>`;
 }
@@ -478,6 +538,40 @@ function stagedPanelHTML() {
       <div class="panel">
         <h2>分段落位复核 <span class="count">已启用</span></h2>
         <p class="muted" style="font-size:12.5px;margin:0">${esc(sr.message)}</p>
+      </div>`;
+  }
+  if (sr.reason === "baseline-infeasible") {
+    const v = sr.baselineViolation;
+    const name = (i) => r.points[i].name;
+    const crossing = v.kind === "crossing";
+    return `
+      <div class="panel staged-panel">
+        <h2>分段落位复核 <span class="count">已启用 · 施工起点不安全</span></h2>
+        <p class="muted" style="font-size:12.5px;margin:0 0 8px">
+          施工起点（尚未落位任何点的基线网）已违反硬约束，分段复核在基线起点即判负，
+          未进入落位顺序搜索；右侧几何图以红色标出基线违约边。
+        </p>
+        <table class="data">
+          <thead><tr><th>违约类型</th><th>基线证据</th></tr></thead>
+          <tbody>
+            <tr class="badrow">
+              <td><span class="tag-bad">${crossing ? "非共端边相交" : "边长越界"}</span></td>
+              <td>
+                ${crossing
+                  ? `边 #${v.edgeA}（${esc(name(v.endpointsA[0]))}–${esc(name(v.endpointsA[1]))}）× 边 #${v.edgeB}（${esc(name(v.endpointsB[0]))}–${esc(name(v.endpointsB[1]))}）
+                     ${v.touching ? "单点相切" : "正向相交"}<br>
+                     <span class="muted mono" style="font-size:11.5px">
+                     ${JSON.stringify(v.coordsA)} × ${JSON.stringify(v.coordsB)}</span>`
+                  : `边 #${v.edgeIndex}（${esc(name(v.endpoints[0]))}–${esc(name(v.endpoints[1]))}）
+                     长度平方 ${v.actualSq} ${v.side}（闭区间 [${v.minSq}, ${v.maxSq}]）`}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted" style="font-size:12px;margin:8px 0 0">
+          扫描统计：终态几何可行组合 ${sr.search.finalFeasibleCombinations} 个，但施工起点违约，
+          访问前缀状态 ${sr.search.orderSearchVisitedStates} 个；终态可合法 ≠ 首步可施工。
+        </p>
       </div>`;
   }
   if (sr.reason === "no-safe-order") {
@@ -697,6 +791,11 @@ function render() {
                  琥珀色「锚定候选」标识分段落位受阻证据所锚定的静态最优方案
                  （其最终几何合格，但不存在安全施工次序）；
                  右侧“分段落位复核”面板给出最早受阻步骤与逐一尝试点候选。</p>`
+            : state.stagedReview && state.report.stagedReview?.reason === "baseline-infeasible"
+              ? `<p class="muted" style="font-size:12px;margin:4px 0 10px;color:#d8b08a">
+                   <b>施工起点不安全</b>：尚未落位任何点的基线网已违约（非共端边相交/相切或边长越界），
+                   即使存在终态合法的候选组合也不可施工；琥珀色「锚定候选」为静态最优组合，
+                   右侧“分段落位复核”面板与几何图给出基线起点交叉证据。</p>`
             : `<p class="muted" style="font-size:12px;margin:4px 0 10px;color:#d89191">
                无可行方案：红色「证据候选」仅标识首个违约组合在各点取到的候选，
                <b>不是采用结论</b>；灰色为该组合未取到的候选。</p>`)

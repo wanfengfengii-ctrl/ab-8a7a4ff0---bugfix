@@ -7,6 +7,8 @@
   - 联合裁决：静态最优但无法安全落位的方案被跳过，改取可落位的次优方案；
   - 无安全次序时稳定给出最早受阻步骤、已落位集合、尝试点候选、首条违约；
   - 静态本就无解时不进入排序；
+  - 施工起点（基线网）本身已交叉/相切/边长越界时直接判负
+    （baseline-infeasible），即使终态组合合法也不得放行；
   - 录入校验（stagedReview 必须为布尔值）。
 """
 
@@ -71,6 +73,63 @@ def _staged(payload):
     p = json.loads(json.dumps(payload))
     p["stagedReview"] = True
     return adjudicate(p)
+
+
+def _baseline_crossing_payload(*, touch=False):
+    """基线 A–D 与 B–C 不共端点且在基线坐标正向相交（或单点相切）。
+
+    三角面刻意不含 A/D，使 A 的目标位移（向右移出）能在终态消除交叉：
+    未启用分段复核时存在静态可行的最终组合，但施工起点已不安全。
+    touch=True 时 B–C 的端点 C 恰好落在 A–D 上（T 字接触，交集为单点）。
+    """
+    cx, cy = (3, 3) if touch else (0, 9)
+    points = [
+        {"name": "A", "x": 0, "y": 0},
+        {"name": "B", "x": 9, "y": 0},
+        {"name": "C", "x": cx, "y": cy},
+        {"name": "D", "x": 9, "y": 9},
+        {"name": "E", "x": 30, "y": 30},
+    ]
+    return {
+        "points": points,
+        "triangles": [[1, 2, 4]],
+        "edges": [
+            {"endpoints": [0, 3], "minSq": 0, "maxSq": 10_000_000},
+            {"endpoints": [1, 2], "minSq": 0, "maxSq": 10_000_000},
+        ],
+        "candidates": [
+            [[0, 0], [10, 0]],          # A 右移后 A–D 变为竖线，交叉消除
+            [[0, 0], [1, 1]],
+            [[0, 0], [-1, 1]],
+            [[0, 0], [0, 1]],
+            [[0, 0], [1, 0]],
+        ],
+    }
+
+
+def _baseline_length_payload():
+    """基线登记边长度平方低于下限，但顶点位移可让终态边长合格。"""
+    return {
+        "points": [
+            {"name": "A", "x": 0, "y": 0},
+            {"name": "D", "x": 3, "y": 4},       # A–D 基线长²=25
+            {"name": "B", "x": 10, "y": 0},
+            {"name": "C", "x": 10, "y": 10},
+            {"name": "E", "x": 30, "y": 30},
+        ],
+        "triangles": [[2, 3, 4]],
+        "edges": [
+            {"endpoints": [0, 1], "minSq": 100, "maxSq": 1000},
+            {"endpoints": [2, 3], "minSq": 0, "maxSq": 10_000_000},
+        ],
+        "candidates": [
+            [[0, 0], [0, 10]],                   # A 上移 10 后终态长²=144
+            [[0, 0], [0, 6]],
+            [[0, 0], [1, 1]],
+            [[0, 0], [-1, 1]],
+            [[0, 0], [1, 0]],
+        ],
+    }
 
 
 # --------------------------------------------------------------- 未启用保持原样
@@ -279,3 +338,88 @@ def test_static_infeasible_short_circuits_staging():
     assert sr["search"]["finalFeasibleCombinations"] == 0
     # 静态首个违约证据照常返回
     assert report["firstViolation"]["kind"] == "length"
+
+
+# ------------------------------------------------- 施工起点基线网违约
+
+def test_baseline_crossing_is_feasible_without_staged_review():
+    # 关闭分段复核：静态最终几何裁决语义不变——A 右移消除交叉，方案可行
+    payload = _baseline_crossing_payload()
+    static = adjudicate(json.loads(json.dumps(payload)))
+    assert static["feasible"] is True
+    assert "stagedReview" not in static
+    assert static["conflicts"] == []
+    assert static["choice"][0] == 1  # A 取消除交叉的候选
+
+
+def test_baseline_crossing_rejected_when_staged():
+    # 回归核心：启用分段复核后，基线已交叉的网必须判为不可安全施工，
+    # 即使存在终态合法的候选组合。
+    payload = _baseline_crossing_payload()
+    report = _staged(payload)
+    sr = report["stagedReview"]
+    assert report["feasible"] is False
+    assert sr["feasible"] is False
+    assert sr["reason"] == "baseline-infeasible"
+    assert sr["order"] is None and sr["steps"] == []
+    assert sr["blocking"] is None
+    bv = sr["baselineViolation"]
+    assert bv["kind"] == "crossing" and bv["touching"] is False
+    assert {bv["edgeA"], bv["edgeB"]} == {0, 1}
+    assert bv["endpointsA"] == [0, 3] and bv["endpointsB"] == [1, 2]
+    # 基线交叉证据：原坐标 A(0,0)–D(9,9) 与 B(9,0)–C(0,9)
+    assert bv["coordsA"] == [[0, 0], [9, 9]]
+    assert bv["coordsB"] == [[9, 0], [0, 9]]
+    assert "施工起点" in bv["message"]
+    # 终态确有可行组合——不能因终态合法而忽略起点风险
+    assert sr["search"]["finalFeasibleCombinations"] >= 1
+    assert sr["search"]["orderSearchedCombinations"] == 0
+    assert sr["search"]["orderSearchVisitedStates"] == 0
+    # 无静态首个违约（终态几何本身合法）
+    assert report["firstViolation"] is None
+
+
+def test_baseline_touching_also_rejected_when_staged():
+    # 交集恰为单点（T 字接触）同样违反“非共端边不相交也不相切”
+    payload = _baseline_crossing_payload(touch=True)
+    report = _staged(payload)
+    sr = report["stagedReview"]
+    assert sr["reason"] == "baseline-infeasible"
+    bv = sr["baselineViolation"]
+    assert bv["kind"] == "crossing" and bv["touching"] is True
+    assert {bv["edgeA"], bv["edgeB"]} == {0, 1}
+
+
+def test_baseline_length_violation_rejected_when_staged():
+    # 起点基线边长越界（即便位移后可修复）同样是不安全的施工起点
+    payload = _baseline_length_payload()
+    assert adjudicate(json.loads(json.dumps(payload)))["feasible"] is True
+    report = _staged(payload)
+    sr = report["stagedReview"]
+    assert sr["reason"] == "baseline-infeasible"
+    bv = sr["baselineViolation"]
+    assert bv["kind"] == "length"
+    assert bv["edgeIndex"] == 0 and bv["actualSq"] == 25
+    assert bv["minSq"] == 100
+    assert sr["search"]["finalFeasibleCombinations"] >= 1
+
+
+def test_baseline_infeasible_is_deterministic():
+    payload = _baseline_crossing_payload()
+    r1 = _staged(payload)
+    r2 = _staged(payload)
+    j1 = json.dumps(r1["stagedReview"], sort_keys=True, ensure_ascii=False)
+    j2 = json.dumps(r2["stagedReview"], sort_keys=True, ensure_ascii=False)
+    assert j1 == j2
+
+
+def test_safe_baseline_still_adjudicates_as_before():
+    # 基线本身安全的草稿（内置示例）启用分段复核后结论保持不变
+    from app.sample import example_payload
+    p = example_payload()
+    p["stagedReview"] = True
+    report = adjudicate(p)
+    sr = report["stagedReview"]
+    assert report["feasible"] is True
+    assert sr["reason"] == "ok"
+    assert sorted(sr["order"]) == list(range(len(p["points"])))
