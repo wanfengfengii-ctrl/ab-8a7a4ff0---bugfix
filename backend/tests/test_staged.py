@@ -262,6 +262,143 @@ def test_no_safe_order_is_deterministic():
     assert b1 == b2
 
 
+# --------------------------------------------------------------- 施工起点（基线网）违约
+
+def _baseline_crossing_payload():
+    """五点草稿：登记边 A–D 与 B–C 不共享端点且在基线坐标正向相交。
+
+    交点为 (2,2)（非相切）；A 取候选 (-10,10) 后 A'–D 与 B–C 不再相交，
+    最终组合静态可行——但启用分段复核时施工起点即不安全，必须拒绝。
+    """
+    def mv(a, b):
+        return [b[0] - a[0], b[1] - a[1]]
+
+    return {
+        "points": [
+            {"name": "A", "x": 0, "y": 0},
+            {"name": "B", "x": 0, "y": 4},
+            {"name": "C", "x": 4, "y": 0},
+            {"name": "D", "x": 4, "y": 4},
+            {"name": "E", "x": 30, "y": -30},
+        ],
+        "triangles": [[0, 1, 4]],
+        "edges": [
+            {"endpoints": [0, 3], "minSq": 0, "maxSq": 10_000_000},
+            {"endpoints": [1, 2], "minSq": 0, "maxSq": 10_000_000},
+        ],
+        "candidates": [
+            [[0, 0], [-10, 10]],
+            [[0, 0], [1, 0]],
+            [[0, 0], [0, 1]],
+            [[0, 0], [1, 1]],
+            [[0, 0], [1, 0]],
+        ],
+    }
+
+
+def test_baseline_crossing_statically_feasible():
+    # 前置条件：最终组合可合法（A 的目标位移消除交叉），
+    # 关闭分段复核时既有静态最终几何裁决语义不变。
+    payload = _baseline_crossing_payload()
+    static = adjudicate(json.loads(json.dumps(payload)))
+    assert static["feasible"] is True
+    assert static["choice"] == [1, 0, 0, 0, 0]
+    assert static["conflicts"] == []
+    assert "stagedReview" not in static
+
+    payload["stagedReview"] = False
+    static_explicit = adjudicate(json.loads(json.dumps(payload)))
+    assert static_explicit["feasible"] is True
+    assert "stagedReview" not in static_explicit
+
+
+def test_baseline_crossing_rejected_with_baseline_evidence():
+    payload = _baseline_crossing_payload()
+    report = _staged(payload)
+    assert report["feasible"] is False
+    sr = report["stagedReview"]
+    assert sr["feasible"] is False
+    assert sr["reason"] == "baseline-unsafe"
+    assert sr["order"] is None and sr["steps"] == []
+    b = sr["blocking"]
+    assert b["kind"] == "baseline-unsafe"
+    assert b["step"] == 0
+    v = b["firstViolation"]
+    assert v["kind"] == "crossing"
+    assert {v["edgeA"], v["edgeB"]} == {0, 1}
+    assert v["endpointsA"] == [0, 3] and v["endpointsB"] == [1, 2]
+    assert v["touching"] is False  # 正向相交而非单点相切
+    assert "基线" in v["message"] and "相交" in v["message"]
+    # 基线交叉证据：整数坐标与相交判定
+    hits = [c for c in b["baselineChecks"]["crossChecks"] if c["intersect"]]
+    assert len(hits) == 1
+    hit = hits[0]
+    assert {hit["edgeA"], hit["edgeB"]} == {0, 1}
+    assert hit["coordsA"] == [[0, 0], [4, 4]]
+    assert hit["coordsB"] == [[0, 4], [4, 0]]
+    assert hit["touching"] is False
+    # 未进入任何次序搜索
+    info = sr["search"]
+    assert info["orderSearchedCombinations"] == 0
+    assert info["orderSearchVisitedStates"] == 0
+    # 终态字段锚定基线网（零位移），不锚定候选组合
+    assert report["choice"] is None and report["objective"] is None
+    assert report["firstViolation"] is None
+    assert report["movedPoints"] == [[p["x"], p["y"]]
+                                     for p in payload["points"]]
+    assert len(report["conflicts"]) == 1
+    assert {report["conflicts"][0]["edgeA"],
+            report["conflicts"][0]["edgeB"]} == {0, 1}
+    assert all(row["candidateIndex"] is None for row in report["assignment"])
+
+
+def test_baseline_crossing_result_is_deterministic():
+    payload = _baseline_crossing_payload()
+    r1 = _staged(payload)
+    r2 = _staged(payload)
+    assert json.dumps(r1, sort_keys=True, ensure_ascii=False) == json.dumps(
+        r2, sort_keys=True, ensure_ascii=False)
+
+
+def test_baseline_length_violation_rejected_even_if_final_feasible():
+    # 基线下 A–D 长度平方为 25；把下限抬到 33，终态 A 取 (-10,10) 后
+    # A'–D 长度平方 85，静态可行；但施工起点边长即越界。
+    # D=(-3,4)：A–D 全程位于直线 x+y=4（B–C）下方，两线不相交，
+    # 故起点首个违约为边长而非相交。
+    payload = _baseline_crossing_payload()
+    payload["points"][3] = {"name": "D", "x": -3, "y": 4}
+    payload["edges"][0]["minSq"] = 33
+    payload["edges"][0]["maxSq"] = 10_000_000
+    static = adjudicate(json.loads(json.dumps(payload)))
+    assert static["feasible"] is True
+    assert static["choice"][0] == 1
+    report = _staged(payload)
+    sr = report["stagedReview"]
+    assert sr["feasible"] is False
+    assert sr["reason"] == "baseline-unsafe"
+    v = sr["blocking"]["firstViolation"]
+    assert v["kind"] == "length"
+    assert v["edgeIndex"] == 0 and v["actualSq"] == 25
+    assert v["minSq"] == 33
+    bad_edges = [e for e in sr["blocking"]["baselineChecks"]["edges"]
+                 if not e["within"]]
+    assert len(bad_edges) == 1 and bad_edges[0]["edgeIndex"] == 0
+    assert not any(c["intersect"]
+                   for c in sr["blocking"]["baselineChecks"]["crossChecks"])
+
+
+def test_safe_baseline_still_gets_ok_conclusion():
+    # 安全基线草稿（内置示例）启用复核后结论不变：存在安全次序
+    from app.sample import example_payload
+    p = example_payload()
+    p["stagedReview"] = True
+    report = adjudicate(p)
+    sr = report["stagedReview"]
+    assert report["feasible"] is True
+    assert sr["feasible"] is True and sr["reason"] == "ok"
+    assert sorted(sr["order"]) == list(range(len(p["points"])))
+
+
 # --------------------------------------------------------------- 静态本就无解
 
 def test_static_infeasible_short_circuits_staging():

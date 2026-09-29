@@ -24,8 +24,10 @@
 分段落位复核（stagedReview=true）
 --------------------------------
 在候选位移与落位顺序的**完整组合空间**中联合裁决：逐点把基准点从基线位置
-移至该方案采用的位置，每一步形成的混合网（已落位点取位移后坐标，未落位点
-仍取基线坐标）都必须继续满足上述三条硬规则。最终方案仍按 (a)(b)(c) 比较；
+移至该方案采用的位置，**施工起点（尚无任何点落位的基线网）与每一步形成的
+混合网**（已落位点取位移后坐标，未落位点仍取基线坐标）都必须继续满足上述
+三条硬规则；基线本身已不合法时直接以 baseline-unsafe 拒绝，不进入次序
+搜索。最终方案仍按 (a)(b)(c) 比较；
 静态指标相同的方案不存在（候选序号向量唯一确定方案），但静态最优方案若不
 存在安全次序，裁决会继续考察静态上次优、却可安全落位的方案，而**不是**先
 选定静态方案再事后试排。次序间再按：
@@ -244,6 +246,79 @@ def _target_positions(choice: tuple[int, ...] | list[int],
     ]
 
 
+def _geometry_violation(pos: list[tuple[int, int]], *,
+                        points: list[dict[str, Any]],
+                        triangles: list[list[int]],
+                        edges: list[dict[str, Any]],
+                        base_area: list[int],
+                        edge_pairs: list[tuple[int, int]]
+                        ) -> dict[str, Any] | None:
+    """在给定网坐标（终态或任一混合网）上取首个硬约束违约。
+
+    违约判定次序：朝向 → 边长 → 非共端边相交；同类按录入顺序。
+    全部判定只使用整数运算。
+    """
+    # 1) 严格朝向
+    for ti, tri in enumerate(triangles):
+        area = _signed_area2(pos, tri)
+        if area * base_area[ti] <= 0:
+            return {
+                "kind": "orientation",
+                "order": (0, ti),
+                "triangleIndex": ti,
+                "vertices": tri,
+                "originalSignedArea2": base_area[ti],
+                "actualSignedArea2": area,
+                "message": _orientation_message(ti, tri, points,
+                                                 base_area[ti], area),
+            }
+
+    # 2) 边长平方闭区间
+    for ei, e in enumerate(edges):
+        u, v = e["endpoints"]
+        d2 = ((pos[u][0] - pos[v][0]) ** 2
+              + (pos[u][1] - pos[v][1]) ** 2)
+        if d2 < e["minSq"] or d2 > e["maxSq"]:
+            side = "小于下限" if d2 < e["minSq"] else "大于上限"
+            return {
+                "kind": "length",
+                "order": (1, ei),
+                "edgeIndex": ei,
+                "endpoints": [u, v],
+                "minSq": e["minSq"],
+                "maxSq": e["maxSq"],
+                "actualSq": d2,
+                "side": side,
+                "message": (
+                    f"边 {points[u]['name']}–{points[v]['name']} "
+                    f"实际长度平方 {d2} {side}（闭区间 "
+                    f"[{e['minSq']}, {e['maxSq']}]）"),
+            }
+
+    # 3) 非共端边相交/相切
+    for pair_order, (ei, ej) in enumerate(edge_pairs):
+        a = edges[ei]["endpoints"]
+        b = edges[ej]["endpoints"]
+        hit = _segment_hit(pos[a[0]], pos[a[1]], pos[b[0]], pos[b[1]])
+        if hit.intersect:
+            kind = "相切（单点接触）" if hit.touching else "相交"
+            return {
+                "kind": "crossing",
+                "order": (2, pair_order),
+                "edgeA": ei,
+                "edgeB": ej,
+                "endpointsA": a,
+                "endpointsB": b,
+                "touching": hit.touching,
+                "message": (
+                    f"不共享端点的边 "
+                    f"{points[a[0]]['name']}–{points[a[1]]['name']} 与 "
+                    f"{points[b[0]]['name']}–{points[b[1]]['name']}{kind}，"
+                    "缆线不得交叉或相切"),
+            }
+    return None
+
+
 def _evaluate_choice(choice: tuple[int, ...], *,
                      points: list[dict[str, Any]],
                      triangles: list[list[int]],
@@ -254,78 +329,11 @@ def _evaluate_choice(choice: tuple[int, ...], *,
                      edge_pairs: list[tuple[int, int]]
                      ) -> tuple[dict[str, Any] | None,
                                 list[tuple[int, int]]]:
-    """评估一个最终（全部点落位后）组合，返回首个违约（无则 None）与终态坐标。
-
-    违约判定次序：朝向 → 边长 → 非共端边相交；同类按录入顺序。
-    """
+    """评估一个最终（全部点落位后）组合，返回首个违约（无则 None）与终态坐标。"""
     moved = _target_positions(choice, origin, candidates)
-    violation: dict[str, Any] | None = None
-
-    # 1) 严格朝向
-    for ti, tri in enumerate(triangles):
-        area = _signed_area2(moved, tri)
-        if area * base_area[ti] <= 0:
-            violation = {
-                "kind": "orientation",
-                "order": (0, ti),
-                "triangleIndex": ti,
-                "vertices": tri,
-                "originalSignedArea2": base_area[ti],
-                "actualSignedArea2": area,
-                "message": _orientation_message(ti, tri, points,
-                                                 base_area[ti], area),
-            }
-            break
-
-    # 2) 边长平方闭区间
-    if violation is None:
-        for ei, e in enumerate(edges):
-            u, v = e["endpoints"]
-            d2 = ((moved[u][0] - moved[v][0]) ** 2
-                  + (moved[u][1] - moved[v][1]) ** 2)
-            if d2 < e["minSq"] or d2 > e["maxSq"]:
-                side = "小于下限" if d2 < e["minSq"] else "大于上限"
-                violation = {
-                    "kind": "length",
-                    "order": (1, ei),
-                    "edgeIndex": ei,
-                    "endpoints": [u, v],
-                    "minSq": e["minSq"],
-                    "maxSq": e["maxSq"],
-                    "actualSq": d2,
-                    "side": side,
-                    "message": (
-                        f"边 {points[u]['name']}–{points[v]['name']} "
-                        f"实际长度平方 {d2} {side}（闭区间 "
-                        f"[{e['minSq']}, {e['maxSq']}]）"),
-                }
-                break
-
-    # 3) 非共端边相交/相切
-    if violation is None:
-        for pair_order, (ei, ej) in enumerate(edge_pairs):
-            a = edges[ei]["endpoints"]
-            b = edges[ej]["endpoints"]
-            hit = _segment_hit(moved[a[0]], moved[a[1]],
-                               moved[b[0]], moved[b[1]])
-            if hit.intersect:
-                kind = "相切（单点接触）" if hit.touching else "相交"
-                violation = {
-                    "kind": "crossing",
-                    "order": (2, pair_order),
-                    "edgeA": ei,
-                    "edgeB": ej,
-                    "endpointsA": a,
-                    "endpointsB": b,
-                    "touching": hit.touching,
-                    "message": (
-                        f"不共享端点的边 "
-                        f"{points[a[0]]['name']}–{points[a[1]]['name']} 与 "
-                        f"{points[b[0]]['name']}–{points[b[1]]['name']}{kind}，"
-                        "缆线不得交叉或相切"),
-                }
-                break
-
+    violation = _geometry_violation(
+        moved, points=points, triangles=triangles, edges=edges,
+        base_area=base_area, edge_pairs=edge_pairs)
     return violation, moved
 
 
@@ -796,6 +804,116 @@ def _build_steps(choice: list[int], order: list[int], peaks: list[int],
     return steps
 
 
+def _baseline_check_rows(pos: list[tuple[int, int]], *,
+                         points: list[dict[str, Any]],
+                         triangles: list[list[int]],
+                         edges: list[dict[str, Any]],
+                         base_area: list[int],
+                         edge_pairs: list[tuple[int, int]]
+                         ) -> dict[str, Any]:
+    """构造施工起点（基线网本身）的全量整数几何证据表。
+
+    与逐步落位证据同构（triangles/edges/crossChecks），边对附基线坐标，
+    可直接供前端表格复用。
+    """
+    geo = _geometry_rows(
+        pos, points=points, triangles=triangles, edges=edges,
+        base_area=base_area, edge_pairs=edge_pairs)
+    pair_rows = []
+    for ei, ej in edge_pairs:
+        a = edges[ei]["endpoints"]
+        b = edges[ej]["endpoints"]
+        hit = _segment_hit(pos[a[0]], pos[a[1]], pos[b[0]], pos[b[1]])
+        pair_rows.append({
+            "edgeA": ei,
+            "edgeB": ej,
+            "endpointsA": a,
+            "endpointsB": b,
+            "coordsA": [[pos[a[0]][0], pos[a[0]][1]],
+                        [pos[a[1]][0], pos[a[1]][1]]],
+            "coordsB": [[pos[b[0]][0], pos[b[0]][1]],
+                        [pos[b[1]][0], pos[b[1]][1]]],
+            "intersect": hit.intersect,
+            "touching": hit.touching,
+        })
+    return {"triangles": geo["triangles"], "edges": geo["edges"],
+            "crossChecks": pair_rows}
+
+
+def _baseline_unsafe_review(origin: list[tuple[int, int]], *,
+                            points: list[dict[str, Any]],
+                            triangles: list[list[int]],
+                            edges: list[dict[str, Any]],
+                            base_area: list[int],
+                            edge_pairs: list[tuple[int, int]],
+                            first_violation: dict[str, Any],
+                            total: int) -> dict[str, Any]:
+    """施工起点（尚无任何点落位的基线网）即违约时的复核结论。
+
+    逐段落位要求施工起点与每次落位后的混合网都满足全部硬约束；基线
+    本身不合法时，无论最终组合如何、落位次序如何，都不可能安全施工，
+    故不再进入候选 × 次序的联合搜索。
+    """
+    frag = _baseline_check_rows(
+        origin, points=points, triangles=triangles, edges=edges,
+        base_area=base_area, edge_pairs=edge_pairs)
+
+    v = dict(first_violation)
+    v.pop("order", None)
+    kind = v["kind"]
+    if kind == "crossing":
+        a, b = v["endpointsA"], v["endpointsB"]
+        contact = "单点相切" if v["touching"] else "正向相交"
+        detail = (
+            f"不共享端点的边 {points[a[0]]['name']}–{points[a[1]]['name']} 与 "
+            f"{points[b[0]]['name']}–{points[b[1]]['name']}{contact}，"
+            "违反非共端边不得相交或相切的要求")
+    elif kind == "length":
+        u, w = v["endpoints"]
+        detail = (
+            f"边 {points[u]['name']}–{points[w]['name']} 长度平方 "
+            f"{v['actualSq']} {v['side']}（闭区间 "
+            f"[{v['minSq']}, {v['maxSq']}]），违反边长闭区间要求")
+    else:
+        names = "、".join(points[z]["name"] for z in v["vertices"])
+        detail = (
+            f"三角面 {v['triangleIndex'] + 1}（{names}）两倍有向面积 "
+            f"{v['actualSignedArea2']} 未与基线严格同号，"
+            "违反严格朝向要求")
+    v["message"] = (f"基线网（施工起点，尚无任何点落位）中{detail}")
+
+    blocking = {
+        "kind": "baseline-unsafe",
+        "step": 0,
+        "baselineChecks": frag,
+        "firstViolation": v,
+        "message": (
+            f"施工起点不安全：基线网在尚无任何点落位时即违约——{detail}；"
+            "逐段落位要求施工起点与每次落位后的混合网都满足朝向、边长"
+            "闭区间与非共端边不相交规则，任何候选位移与落位次序都无法"
+            "安全施工（最终组合合法亦不能豁免起点风险）。"),
+    }
+    return {
+        "enabled": True,
+        "feasible": False,
+        "reason": "baseline-unsafe",
+        "message": (
+            "基线网本身不满足硬约束，施工起点即不安全，"
+            "未进入候选位移 × 落位次序的联合搜索（终态组合合法也不能"
+            "豁免起点风险）。"),
+        "order": None,
+        "steps": [],
+        "blocking": blocking,
+        "search": {
+            "combinations": total,
+            "finalFeasibleCombinations": None,
+            "orderSearchedCombinations": 0,
+            "permutationsPerCombination": math.factorial(len(points)),
+            "orderSearchVisitedStates": 0,
+        },
+    }
+
+
 def _attach_staged_review(report: dict[str, Any], *,
                           points: list[dict[str, Any]],
                           triangles: list[list[int]],
@@ -829,6 +947,25 @@ def _attach_staged_review(report: dict[str, Any], *,
             },
         }
         return report
+
+    # 情形二（前置）：施工起点（尚无任何点落位的基线网）本身即违约。
+    # 逐段落位要求起点与每次落位后的混合网都合法；基线已交叉/退化/越界时，
+    # 最终组合合法也不能豁免首步即不安全，故不进入次序搜索。
+    baseline_violation = _geometry_violation(
+        origin, points=points, triangles=triangles, edges=edges,
+        base_area=base_area, edge_pairs=edge_pairs)
+    if baseline_violation is not None:
+        # 终态字段锚定基线网：movedPoints 取零位移，几何表直接呈现
+        # 起点的朝向/边长/相交证据；不锚定任何候选组合。
+        baseline_report = _build_baseline_report(
+            points=points, triangles=triangles, edges=edges,
+            candidates=candidates, origin=origin, base_area=base_area,
+            edge_pairs=edge_pairs, tried=tried, total=total)
+        baseline_report["stagedReview"] = _baseline_unsafe_review(
+            origin, points=points, triangles=triangles, edges=edges,
+            base_area=base_area, edge_pairs=edge_pairs,
+            first_violation=baseline_violation, total=total)
+        return baseline_report
 
     # 收集全部静态可行组合，按既有三级静态目标升序——
     # 第一个“同时存在安全落位次序”的组合即联合裁决的全局最优。
@@ -998,6 +1135,99 @@ def _static_key(choice: list[int] | tuple[int, ...],
     return max(disp_sq), sum(disp_sq), tuple(choice)
 
 
+def _geometry_rows(pos: list[tuple[int, int]], *,
+                   points: list[dict[str, Any]],
+                   triangles: list[list[int]],
+                   edges: list[dict[str, Any]],
+                   base_area: list[int],
+                   edge_pairs: list[tuple[int, int]]) -> dict[str, Any]:
+    """给定网坐标上的边长/朝向/非共端边冲突全量证据表（整数运算）。"""
+    edge_rows = []
+    for ei, e in enumerate(edges):
+        u, v = e["endpoints"]
+        d2 = ((pos[u][0] - pos[v][0]) ** 2
+              + (pos[u][1] - pos[v][1]) ** 2)
+        edge_rows.append({
+            "edgeIndex": ei,
+            "endpoints": [u, v],
+            "minSq": e["minSq"],
+            "maxSq": e["maxSq"],
+            "actualSq": d2,
+            "within": e["minSq"] <= d2 <= e["maxSq"],
+        })
+    tri_rows = []
+    for ti, tri in enumerate(triangles):
+        area = _signed_area2(pos, tri)
+        tri_rows.append({
+            "triangleIndex": ti,
+            "vertices": tri,
+            "originalSignedArea2": base_area[ti],
+            "actualSignedArea2": area,
+            "preserved": area * base_area[ti] > 0,
+        })
+    conflicts = []
+    for ei, ej in edge_pairs:
+        a = edges[ei]["endpoints"]
+        b = edges[ej]["endpoints"]
+        hit = _segment_hit(pos[a[0]], pos[a[1]], pos[b[0]], pos[b[1]])
+        if hit.intersect:
+            conflicts.append({
+                "edgeA": ei, "edgeB": ej,
+                "endpointsA": a, "endpointsB": b,
+                "touching": hit.touching,
+            })
+    return {"edges": edge_rows, "triangles": tri_rows,
+            "conflicts": conflicts}
+
+
+def _build_baseline_report(*, points, triangles, edges, candidates, origin,
+                           base_area, edge_pairs, tried, total,
+                           ) -> dict[str, Any]:
+    """施工起点违约时锚定基线网（零位移）的终态证据报告。
+
+    不锚定任何候选组合：choice/objective 为 None，assignment 逐点列出
+    全部候选且不标记采用；几何表（movedPoints/edges/triangles/
+    conflicts）全部取基线坐标。
+    """
+    def baseline_assignment_entries() -> list[dict[str, Any]]:
+        out = []
+        for i, group in enumerate(candidates):
+            out.append({
+                "pointIndex": i,
+                "pointName": points[i]["name"],
+                "candidateIndex": None,
+                "displacement": None,
+                "displacementSq": None,
+                "displaced": [origin[i][0], origin[i][1]],
+                "candidates": [{
+                    "candidateIndex": j,
+                    "displacement": [dx, dy],
+                    "displacementSq": dx * dx + dy * dy,
+                    "displaced": [origin[i][0] + dx, origin[i][1] + dy],
+                } for j, (dx, dy) in enumerate(group)],
+            })
+        return out
+
+    report: dict[str, Any] = {
+        "feasible": False,
+        "triedCombinations": tried,
+        "totalCombinations": total,
+        "points": [{"name": p["name"], "x": p["x"], "y": p["y"]}
+                   for p in points],
+        "candidateCount": [len(g) for g in candidates],
+        "objective": None,
+        "choice": None,
+        "assignment": baseline_assignment_entries(),
+        "movedPoints": [[x, y] for x, y in origin],
+    }
+    report.update(_geometry_rows(
+        list(origin), points=points, triangles=triangles, edges=edges,
+        base_area=base_area, edge_pairs=edge_pairs))
+    # 基线即起点，不存在“某个最终组合”的违约；起点证据在 stagedReview 内。
+    report["firstViolation"] = None
+    return report
+
+
 def _build_report(points, triangles, edges, candidates, origin,
                   base_area, edge_pairs, best, first_violation, tried, total,
                   ) -> dict[str, Any]:
@@ -1020,47 +1250,11 @@ def _build_report(points, triangles, edges, candidates, origin,
 
     def geometry_report(choice: list[int]) -> dict[str, Any]:
         moved = _target_positions(choice, origin, candidates)
-        edge_rows = []
-        for ei, e in enumerate(edges):
-            u, v = e["endpoints"]
-            d2 = ((moved[u][0] - moved[v][0]) ** 2
-                  + (moved[u][1] - moved[v][1]) ** 2)
-            edge_rows.append({
-                "edgeIndex": ei,
-                "endpoints": [u, v],
-                "minSq": e["minSq"],
-                "maxSq": e["maxSq"],
-                "actualSq": d2,
-                "within": e["minSq"] <= d2 <= e["maxSq"],
-            })
-        tri_rows = []
-        for ti, tri in enumerate(triangles):
-            area = _signed_area2(moved, tri)
-            tri_rows.append({
-                "triangleIndex": ti,
-                "vertices": tri,
-                "originalSignedArea2": base_area[ti],
-                "actualSignedArea2": area,
-                "preserved": area * base_area[ti] > 0,
-            })
-        conflicts = []
-        for ei, ej in edge_pairs:
-            a = edges[ei]["endpoints"]
-            b = edges[ej]["endpoints"]
-            hit = _segment_hit(moved[a[0]], moved[a[1]],
-                               moved[b[0]], moved[b[1]])
-            if hit.intersect:
-                conflicts.append({
-                    "edgeA": ei, "edgeB": ej,
-                    "endpointsA": a, "endpointsB": b,
-                    "touching": hit.touching,
-                })
-        return {
-            "movedPoints": [[x, y] for x, y in moved],
-            "edges": edge_rows,
-            "triangles": tri_rows,
-            "conflicts": conflicts,
-        }
+        geo = _geometry_rows(
+            moved, points=points, triangles=triangles, edges=edges,
+            base_area=base_area, edge_pairs=edge_pairs)
+        geo["movedPoints"] = [[x, y] for x, y in moved]
+        return geo
 
     report: dict[str, Any] = {
         "feasible": best is not None,

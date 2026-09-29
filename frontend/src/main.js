@@ -96,6 +96,8 @@ function pointCardHTML(p, i) {
   const used = rep?.assignment?.[i];
   const cands = state.draft.candidates[i];
   const blocking = state.stagedReview && rep?.stagedReview?.reason === "no-safe-order";
+  const baselineUnsafe = state.stagedReview
+    && rep?.stagedReview?.reason === "baseline-unsafe";
   const rows = cands.map((c, j) => {
     const isPicked = used && used.candidateIndex === j;
     const s2 = sqOf(c);
@@ -109,7 +111,7 @@ function pointCardHTML(p, i) {
         badge = isPicked
           ? '<span class="badge evidence">锚定候选</span>'
           : '<span class="badge rejected">未采用</span>';
-      } else {
+      } else if (!baselineUnsafe) {
         badge = isPicked
           ? '<span class="badge evidence">证据候选</span>'
           : '<span class="badge rejected">未采用</span>';
@@ -129,7 +131,9 @@ function pointCardHTML(p, i) {
       ? `<div class="choice-line">位移后坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>　位移平方：<span class="mono">${used.displacementSq}</span></div>`
       : blocking
         ? `<div class="choice-line" style="color:#d8b08a">落位受阻证据锚定方案的终态坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>（终态几何合格，但无安全施工次序）</div>`
-        : `<div class="choice-line" style="color:#d89191">首个违约组合中该点位移后坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>（非采用结论，仅为证据）</div>`)
+        : baselineUnsafe
+          ? `<div class="choice-line" style="color:#d89191">基线坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>（施工起点即违约，裁决不锚定任何候选组合）</div>`
+          : `<div class="choice-line" style="color:#d89191">首个违约组合中该点位移后坐标：<span class="mono">(${used.displaced[0]}, ${used.displaced[1]})</span>（非采用结论，仅为证据）</div>`)
     : "";
   const cardCls = used
     ? (rep.feasible ? " chosen" : " evidence-card")
@@ -211,7 +215,11 @@ function bannerHTML() {
         ${orderLine}
       </div>`;
   }
-  // 无方案：静态几何不可行（firstViolation）或不存在安全落位次序（blocking）
+  // 无方案：施工起点违约（baseline-unsafe）、不存在安全落位次序（blocking）
+  // 或静态几何不可行（firstViolation）
+  if (sr?.reason === "baseline-unsafe") {
+    return baselineUnsafeBannerHTML(sr);
+  }
   if (sr?.reason === "no-safe-order") {
     return stagingBlockedBannerHTML(sr);
   }
@@ -231,6 +239,29 @@ function bannerHTML() {
         <div>${esc(v.message)}</div>
         <div class="kv">
           <span class="k">违约时候选序号</span><span class="v mono">[${v.choice.join(", ")}]</span>
+          ${evidenceKV(v)}
+        </div>
+      </div>
+    </div>`;
+}
+
+function baselineUnsafeBannerHTML(sr) {
+  const b = sr.blocking;
+  const v = b.firstViolation;
+  const kindName = {
+    orientation: "三角面朝向",
+    length: "边长平方闭区间",
+    crossing: "非共端边相交",
+  }[v.kind];
+  return `
+    <div class="banner bad">
+      <h3>⛔ 施工起点不安全 —— 基线网在任何点落位之前已违约</h3>
+      <div>${esc(sr.message)}</div>
+      <div class="evidence">
+        <span class="pill">${kindName}</span>
+        <div>${esc(v.message)}</div>
+        <div class="kv">
+          <span class="k">受阻步骤</span><span class="v">第 0 步（施工起点，尚未落位任何点）</span>
           ${evidenceKV(v)}
         </div>
       </div>
@@ -286,7 +317,7 @@ function evidenceKV(v) {
 function edgeTableHTML() {
   const r = state.report;
   if (!r) return "";
-  const blocking = state.stagedReview && r.stagedReview?.reason === "no-safe-order";
+  const reason = state.stagedReview ? r.stagedReview?.reason : null;
   const rows = r.edges.map((e) => {
     const name = (idx) => r.points[idx].name;
     return `
@@ -300,7 +331,9 @@ function edgeTableHTML() {
       </tr>`;
   }).join("");
   const caption = !r.feasible
-    ? (blocking
+    ? (reason === "baseline-unsafe"
+      ? '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为施工起点（基线网，零位移）的边长证据：基线本身即违反闭区间。</p>'
+      : reason === "no-safe-order"
       ? '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为落位受阻证据所锚定方案（最终几何合格）的边长证据。</p>'
       : '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为首个违约组合下的边长证据（非采用结论）。</p>')
     : "";
@@ -318,7 +351,7 @@ function edgeTableHTML() {
 function triTableHTML() {
   const r = state.report;
   if (!r) return "";
-  const blocking = state.stagedReview && r.stagedReview?.reason === "no-safe-order";
+  const reason = state.stagedReview ? r.stagedReview?.reason : null;
   const rows = r.triangles.map((t) => {
     const names = t.vertices.map((i) => esc(r.points[i].name)).join("、");
     return `
@@ -333,7 +366,9 @@ function triTableHTML() {
       </tr>`;
   }).join("");
   const caption = !r.feasible
-    ? (blocking
+    ? (reason === "baseline-unsafe"
+      ? '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为施工起点（基线网，零位移）的朝向证据。</p>'
+      : reason === "no-safe-order"
       ? '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为落位受阻证据所锚定方案（最终几何合格）的朝向证据。</p>'
       : '<p class="muted" style="font-size:12px;margin:0 0 8px">下表为首个违约组合下的朝向证据（非采用结论）。</p>')
     : "";
@@ -394,9 +429,12 @@ function svgHTML() {
     const p1 = pt(moved[a]), p2 = pt(moved[b]);
     const conflict = v?.kind === "crossing"
       && (v.edgeA === e.edgeIndex || v.edgeB === e.edgeIndex);
+    const baselineConflict = r.conflicts?.some(
+      (c) => c.edgeA === e.edgeIndex || c.edgeB === e.edgeIndex);
     const lenBad = v?.kind === "length" && v.edgeIndex === e.edgeIndex;
-    const color = conflict || lenBad || !e.within ? "#f87171" : "#9fc0ff";
-    const width = conflict || lenBad ? 3 : 1.8;
+    const color = conflict || baselineConflict || lenBad || !e.within
+      ? "#f87171" : "#9fc0ff";
+    const width = conflict || baselineConflict || lenBad ? 3 : 1.8;
     return `<line x1="${p1[0].toFixed(1)}" y1="${p1[1].toFixed(1)}"
       x2="${p2[0].toFixed(1)}" y2="${p2[1].toFixed(1)}"
       stroke="${color}" stroke-width="${width}"/>`;
@@ -483,6 +521,9 @@ function stagedPanelHTML() {
   if (sr.reason === "no-safe-order") {
     return blockingPanelHTML(sr);
   }
+  if (sr.reason === "baseline-unsafe") {
+    return baselineUnsafePanelHTML(sr);
+  }
   const n = sr.steps.length;
   const step = sr.steps[state.stageStep - 1];
   const triRows = step.affectedTriangles.map((t) => `
@@ -547,6 +588,69 @@ function stagedPanelHTML() {
         <thead><tr><th>受影响非共端边对</th><th>边对</th><th>相交复核</th></tr></thead>
         <tbody>${pairRows || '<tr><td colspan="3" class="muted">本步不涉及非共端边对</td></tr>'}</tbody>
       </table>
+    </div>`;
+}
+
+function baselineUnsafePanelHTML(sr) {
+  const r = state.report;
+  const b = sr.blocking;
+  const fv = b.firstViolation;
+  const triRows = b.baselineChecks.triangles.map((t) => {
+    const names = t.vertices.map((i) => esc(r.points[i].name)).join("、");
+    return `
+      <tr class="${t.preserved ? "" : "badrow"}">
+        <td>${t.triangleIndex + 1}</td>
+        <td>${names}</td>
+        <td>${t.originalSignedArea2}</td>
+        <td><b>${t.actualSignedArea2}</b></td>
+        <td class="${t.preserved ? "tag-ok" : "tag-bad"}">${t.preserved ? "同向 ✓" : "破坏 ✗"}</td>
+      </tr>`;
+  }).join("");
+  const edgeRows = b.baselineChecks.edges.map((e) => {
+    const name = (i) => r.points[i].name;
+    return `
+      <tr class="${e.within ? "" : "badrow"}">
+        <td>${e.edgeIndex}</td>
+        <td>${esc(name(e.endpoints[0]))}–${esc(name(e.endpoints[1]))}</td>
+        <td><b>${e.actualSq}</b></td>
+        <td>[${e.minSq}, ${e.maxSq}]</td>
+        <td class="${e.within ? "tag-ok" : "tag-bad"}">${e.within ? "区间内 ✓" : "破坏 ✗"}</td>
+      </tr>`;
+  }).join("");
+  const pairRows = b.baselineChecks.crossChecks.map((c) => {
+    const name = (i) => r.points[i].name;
+    const bad = c.intersect;
+    return `
+      <tr class="${bad ? "badrow" : ""}">
+        <td class="mono">#${c.edgeA} / #${c.edgeB}</td>
+        <td>${esc(name(c.endpointsA[0]))}–${esc(name(c.endpointsA[1]))} × ${esc(name(c.endpointsB[0]))}–${esc(name(c.endpointsB[1]))}</td>
+        <td class="mono">[${c.coordsA.map((p) => `(${p.join(", ")})`).join(" → ")}] ×<br>[${c.coordsB.map((p) => `(${p.join(", ")})`).join(" → ")}]</td>
+        <td class="${bad ? "tag-bad" : "tag-ok"}">${bad ? (c.touching ? "相切 ✗" : "相交 ✗") : "无交 ✓"}</td>
+      </tr>`;
+  }).join("");
+  return `
+    <div class="panel staged-panel">
+      <h2>分段落位复核 <span class="count">已启用 · 施工起点不安全</span></h2>
+      <p class="muted" style="font-size:12.5px;margin:0 0 8px">${esc(sr.message)}</p>
+      <p class="muted" style="font-size:12.5px;margin:0 0 8px">${esc(b.message)}</p>
+      <table class="data">
+        <thead><tr><th>三角面</th><th>顶点</th><th>原面积×2</th><th>基线面积×2</th><th>朝向</th></tr></thead>
+        <tbody>${triRows}</tbody>
+      </table>
+      <table class="data" style="margin-top:8px">
+        <thead><tr><th>登记边</th><th>边</th><th>基线长度²</th><th>闭区间</th><th>边长</th></tr></thead>
+        <tbody>${edgeRows}</tbody>
+      </table>
+      <table class="data" style="margin-top:8px">
+        <thead><tr><th>非共端边对</th><th>边对</th><th>基线整数坐标</th><th>相交复核</th></tr></thead>
+        <tbody>${pairRows}</tbody>
+      </table>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">
+        未进入候选位移 × 落位次序的联合搜索
+        （扫描 ${sr.search.orderSearchVisitedStates} 个前缀状态、
+        ${sr.search.orderSearchedCombinations} 个组合）；
+        首条被破坏约束：<b>${esc(fv.message)}</b>
+      </p>
     </div>`;
 }
 
@@ -697,6 +801,11 @@ function render() {
                  琥珀色「锚定候选」标识分段落位受阻证据所锚定的静态最优方案
                  （其最终几何合格，但不存在安全施工次序）；
                  右侧“分段落位复核”面板给出最早受阻步骤与逐一尝试点候选。</p>`
+            : state.stagedReview && state.report.stagedReview?.reason === "baseline-unsafe"
+              ? `<p class="muted" style="font-size:12px;margin:4px 0 10px;color:#d89191">
+                 施工起点（基线网，零位移）本身已违约，裁决不锚定任何候选组合；
+                 右侧“分段落位复核”面板给出基线朝向/边长/相交全量证据，
+                 几何图中红色为基线即相交的边对。</p>`
             : `<p class="muted" style="font-size:12px;margin:4px 0 10px;color:#d89191">
                无可行方案：红色「证据候选」仅标识首个违约组合在各点取到的候选，
                <b>不是采用结论</b>；灰色为该组合未取到的候选。</p>`)

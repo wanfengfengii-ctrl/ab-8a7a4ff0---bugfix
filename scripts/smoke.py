@@ -8,7 +8,9 @@
   4. 非法草稿返回 400；
   5. 静态首页可访问；
   6. 未启用分段落位复核时响应不含 stagedReview 字段；启用后示例给出
-     安全落位次序与逐步证据；构造的死锁草稿稳定报告最早受阻步骤。
+     安全落位次序与逐步证据；构造的死锁草稿稳定报告最早受阻步骤；
+     基线网本身已交叉的草稿在启用复核时以基线交叉证据拒绝
+     （baseline-unsafe），未启用时静态终态裁决语义保持不变。
 
 任一检查失败即以非零退出码结束。
 """
@@ -191,6 +193,74 @@ def main() -> None:
           b["firstViolation"]["kind"] == "crossing"
           and any(c["intersect"] for t in b["triedCandidates"]
                   for c in t["crossChecks"]))
+
+    # 施工起点即不安全：两条非共端边在基线坐标已正向相交（A-D 与 B-C
+    # 交于 (2,2)），A 的目标位移能在终态消除交叉——静态可行，但启用
+    # 分段复核必须以基线交叉证据拒绝，不能因终态合法而误报安全。
+    baseline_crossing = {
+        "points": [
+            {"name": "A", "x": 0, "y": 0},
+            {"name": "B", "x": 0, "y": 4},
+            {"name": "C", "x": 4, "y": 0},
+            {"name": "D", "x": 4, "y": 4},
+            {"name": "E", "x": 30, "y": -30},
+        ],
+        "triangles": [[0, 1, 4]],
+        "edges": [
+            {"endpoints": [0, 3], "minSq": 0, "maxSq": 10_000_000},
+            {"endpoints": [1, 2], "minSq": 0, "maxSq": 10_000_000},
+        ],
+        "candidates": [
+            [[0, 0], [-10, 10]],
+            [[0, 0], [1, 0]],
+            [[0, 0], [0, 1]],
+            [[0, 0], [1, 1]],
+            [[0, 0], [1, 0]],
+        ],
+    }
+    # 关闭分段复核：静态最终几何裁决语义不变（终态交叉被 A 的位移消除）
+    status, _, raw = _request("POST", f"{base}/api/adjudicate",
+                              baseline_crossing)
+    check("基线交叉草稿（未启用复核）返回 200", status == 200)
+    static_bc = json.loads(raw)
+    check("未启用复核时静态裁决仍判可行（终态语义保持）",
+          static_bc["feasible"] is True
+          and static_bc["conflicts"] == []
+          and "stagedReview" not in static_bc)
+
+    baseline_crossing["stagedReview"] = True
+    status, _, raw = _request("POST", f"{base}/api/adjudicate",
+                              baseline_crossing)
+    check("基线交叉草稿（启用复核）返回 200", status == 200)
+    bc = json.loads(raw)
+    bcsr = bc["stagedReview"]
+    check("施工起点交叉被明确拒绝（baseline-unsafe）",
+          bc["feasible"] is False
+          and bcsr["feasible"] is False
+          and bcsr["reason"] == "baseline-unsafe"
+          and bcsr["order"] is None and bcsr["steps"] == [])
+    bcb = bcsr["blocking"]
+    check("基线交叉证据定位在施工起点（第 0 步）",
+          bcb["kind"] == "baseline-unsafe" and bcb["step"] == 0)
+    bcv = bcb["firstViolation"]
+    check("首条违约为 A–D 与 B–C 的非共端边正向相交",
+          bcv["kind"] == "crossing"
+          and {bcv["edgeA"], bcv["edgeB"]} == {0, 1}
+          and bcv["touching"] is False,
+          json.dumps(bcv, ensure_ascii=False))
+    check("基线复核表给出相交边对的整数坐标证据",
+          any(c["intersect"] and not c["touching"]
+              and c["coordsA"] == [[0, 0], [4, 4]]
+              and c["coordsB"] == [[0, 4], [4, 0]]
+              for c in bcb["baselineChecks"]["crossChecks"]))
+    check("未进入落位次序搜索",
+          bcsr["search"]["orderSearchedCombinations"] == 0
+          and bcsr["search"]["orderSearchVisitedStates"] == 0)
+    check("终态字段锚定基线网（零位移）且不锚定候选组合",
+          bc["movedPoints"] == [[p["x"], p["y"]]
+                                for p in baseline_crossing["points"]]
+          and bc["choice"] is None and bc["objective"] is None
+          and len(bc["conflicts"]) == 1)
 
     bad_flag = json.loads(json.dumps(sample))
     bad_flag["stagedReview"] = "true"

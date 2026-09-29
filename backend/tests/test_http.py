@@ -147,3 +147,57 @@ def test_staged_review_bad_flag_returns_400(http_server):
     sample["stagedReview"] = "yes"
     status, body = _post(http_server, "/api/adjudicate", sample)
     assert status == 400 and "stagedReview" in body["error"]
+
+
+def _baseline_crossing_draft():
+    # A–D 与 B–C 在基线坐标正向相交（交点 (2,2)）；A 取 (-10,10) 后
+    # 终态不再相交，静态可行但施工起点不安全。
+    return {
+        "points": [
+            {"name": "A", "x": 0, "y": 0},
+            {"name": "B", "x": 0, "y": 4},
+            {"name": "C", "x": 4, "y": 0},
+            {"name": "D", "x": 4, "y": 4},
+            {"name": "E", "x": 30, "y": -30},
+        ],
+        "triangles": [[0, 1, 4]],
+        "edges": [
+            {"endpoints": [0, 3], "minSq": 0, "maxSq": 10_000_000},
+            {"endpoints": [1, 2], "minSq": 0, "maxSq": 10_000_000},
+        ],
+        "candidates": [
+            [[0, 0], [-10, 10]],
+            [[0, 0], [1, 0]],
+            [[0, 0], [0, 1]],
+            [[0, 0], [1, 1]],
+            [[0, 0], [1, 0]],
+        ],
+    }
+
+
+def test_staged_review_baseline_crossing_rejected(http_server):
+    # 关闭分段复核：静态终态裁决仍判可行，语义不变
+    status, static = _post(http_server, "/api/adjudicate",
+                           _baseline_crossing_draft())
+    assert status == 200
+    assert static["feasible"] is True
+    assert "stagedReview" not in static
+
+    draft = _baseline_crossing_draft()
+    draft["stagedReview"] = True
+    status, report = _post(http_server, "/api/adjudicate", draft)
+    assert status == 200
+    assert report["feasible"] is False
+    sr = report["stagedReview"]
+    assert sr["enabled"] is True
+    assert sr["feasible"] is False and sr["reason"] == "baseline-unsafe"
+    assert sr["order"] is None and sr["steps"] == []
+    b = sr["blocking"]
+    assert b["kind"] == "baseline-unsafe" and b["step"] == 0
+    v = b["firstViolation"]
+    assert v["kind"] == "crossing"
+    assert {v["edgeA"], v["edgeB"]} == {0, 1}
+    assert any(c["intersect"] and not c["touching"]
+               for c in b["baselineChecks"]["crossChecks"])
+    assert report["movedPoints"] == [[p["x"], p["y"]]
+                                     for p in draft["points"]]
